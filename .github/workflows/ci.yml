@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - name: Lint
+        run: ruff check .
+      - name: Unit + API tests
+        run: pytest -v
+
+  integration:
+    # Spin up the real Postgres + API stack with Compose and hit it over HTTP
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose up -d --build --wait
+      - name: Smoke test against Postgres-backed container
+        run: |
+          curl -fsS localhost:8000/health
+          curl -fsS "localhost:8000/rank?wheelchair=3&medical=2" | tee rank.json
+          grep -q "Harbor City Museum" rank.json
+      - if: always()
+        run: docker compose logs api
+      - if: always()
+        run: docker compose down
+
+  publish:
+    # Only publish images for code that has merged to main
+    needs: integration
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/access-risk-api:latest
+            ghcr.io/${{ github.repository_owner }}/access-risk-api:${{ github.sha }}
